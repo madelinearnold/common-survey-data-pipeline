@@ -60,20 +60,49 @@ load_survey_column_info <- function(response_file, qualtrics_col_name, question_
 
 # Join latest survey vars with prior varinfo, first by fuzzy match on text then match by variable
 join_varinfo <- function(prior_varinfo, column_info, join_column_text, join_column_var, qualtrics_col_name, question_text_col_name, max_string_distance = 3) {
-
-  joined <- 
-    prior_varinfo |>
-    # Create a row_id for filtering after the join
-    rowid_to_column(var = "row_id")  |> 
-    # Replace NAs in the varinfo data frame with an empty string placeholder
-    mutate(!!join_column_text := replace_na(!!sym(join_column_text), "")) |>
-    # perform join with fuzzy matching of text
-    stringdist_left_join(column_info, by = join_by(!!join_column_text == !!question_text_col_name), method = "lv", max_dist = max_string_distance, distance_col = "string_distance") |>
-    # keep only the rows with the best match/lowest distance (e.g. keep perfect over fuzzy matches)
-    arrange(row_id, string_distance) |>
-    distinct(row_id, .keep_all = TRUE) |>
-    # coalesce join using variable names
-    coalesce_left_join(column_info, join_by(!!join_column_var == !!qualtrics_col_name), keep = TRUE) 
+  
+  # join data sets using question text fuzzy matching
+  fuzzy_joined <- prior_varinfo %>%
+    rowid_to_column(var = "row_id") %>%
+    mutate(!!join_column_text := replace_na(!!sym(join_column_text), "")) %>%
+    stringdist_left_join(
+      column_info,
+      by = join_by(!!sym(join_column_text) == !!sym(question_text_col_name)),
+      method       = "lv",
+      max_dist     = max_string_distance,
+      distance_col = "string_distance"
+    ) %>%
+    arrange(row_id, string_distance) %>%
+    distinct(row_id, .keep_all = TRUE)
+  
+  # summarize fuzzy matches
+  total_rows <- nrow(column_info)
+  num_exact            <- sum(fuzzy_joined$string_distance == 0 & !is.na(fuzzy_joined[qualtrics_col_name]), na.rm = TRUE)
+  num_fuzzy            <- sum(!is.na(fuzzy_joined$string_distance) & fuzzy_joined$string_distance > 0 & !is.na(fuzzy_joined[qualtrics_col_name]) , na.rm = TRUE)
+  num_unmatched_text   <- total_rows - num_exact - num_fuzzy
+  
+  message(sprintf(
+    "🔍 Fuzzy text join (max distance = %d): %d exact, %d fuzzy, %d unmatched (out of %d).",
+    max_string_distance, num_exact, num_fuzzy, num_unmatched_text, total_rows
+  ))
+  
+  # additional join using variable names
+  joined <- fuzzy_joined %>%
+    coalesce_left_join(
+      column_info,
+      join_by(!!sym(join_column_var) == !!sym(qualtrics_col_name)),
+      keep = TRUE
+    )
+  
+  # summarize final matches
+  num_total_matched <- sum(!is.na(joined[[qualtrics_col_name]]))
+  num_unmatched     <- total_rows - num_total_matched
+  num_additional_matches <- num_unmatched_text - num_unmatched
+  
+  message(sprintf(
+    "🔗 After variable-name join: %d additional matches, %d total matched, %d still unmatched (out of %d).",
+    num_additional_matches, num_total_matched, num_unmatched, total_rows
+  ))
   
   return(joined)
 }
@@ -93,34 +122,73 @@ export_manual_update_files <- function(joined_varinfo, unmatched_vars) {
   cat("Exported joined data for manual updates. Please update the file and save to the *manually_updated_file* path you specified at the top of the script. Re-run the script once the updates are done to continue processing.\n Also exported unmatched variable data for reference.\n")
 }
 
-# Read and process the manually updated varinfo
-sort_varinfo <- function(updated_varinfo) {
-  sorted_varinfo <-
-  updated_varinfo |>
-    rowid_to_column(var = "row_id")  |> # Create a row_id for sorting
-    # calculate most recent year
-    mutate(across(starts_with("SurveyAdminYear"), ~ as.numeric(.x))) |>
-    rowwise() %>%
+# sort the varinfo file according to digits in SurveyAdmin* columns or user supplied list of columns in recency order
+sort_varinfo <- function(updated_varinfo, survey_admin_cols_in_recency_order = NULL) {
+  # define recency columns
+  if (!is.null(survey_admin_cols_in_recency_order)) {
+    # if user supplies columns in order, use that
+    recency_cols <- survey_admin_cols_in_recency_order
+  } else {
+    # find all SurveyAdmin* columns
+    recency_cols <- grep("^SurveyAdmin", names(updated_varinfo), value = TRUE)
+    # extract all digits, convert to integer (e.g. "2023-1" becomes 20231)
+    digit_lists <- str_extract_all(recency_cols, "\\d+")
+    digit_keys  <- sapply(digit_lists, paste0, collapse = "")
+    col_nums    <- as.integer(digit_keys)
+    # order columns descending so "newest" by numeric key comes first
+    recency_cols <- recency_cols[order(col_nums, decreasing = TRUE)]}
+  # pull the single value for each recency column
+  recency_values <- sapply(recency_cols, function(col) {
+    # grab that entire column vector
+    vals <- updated_varinfo[[col]]
+    # drop blanks and NAs
+    uv   <- unique(vals[!is.na(vals) & vals != ""])
+    if (length(uv) == 0) {
+      NA_character_
+    } else if (length(uv) > 1) {
+      warning("Column ", col, " has >1 distinct non-NA values; using the first")
+      uv[1]
+    } else {
+      uv
+    }
+  }, USE.NAMES = FALSE )
+  # assign rank to values
+  recency_rank <- setNames(seq_along(recency_values), recency_values)
+  message("Recency ranking:\n",
+          paste0(names(recency_rank), " → ", recency_rank, collapse = "\n"))
+  # generate most recent column
+  result <- updated_varinfo |>
+    rowid_to_column("row_id") |>
+    rowwise() |>
     mutate(
-      # Calculate the maximum, handling case where all columns are NA
-      most_recent_year = {
-        # Get the values for the current row
-        vals <- c_across(starts_with("SurveyAdminYear"))
-        # Check if all values are NA
-        if(all(is.na(vals))) {
-          NA_real_ # Assign NA (use NA_real_ for numeric context)
+      most_recent = {
+        # inline pull the row's SurveyAdmin* values
+        v <- c_across(all_of(recency_cols))
+        v <- v[!is.na(v) & v != ""] # drop NA/empty
+        if (length(v) == 0) {
+          NA_character_
         } else {
-          max(vals, na.rm = TRUE) # Calculate max if there's at least one non-NA
+          valid <- intersect(v, names(recency_rank))
+          if (length(valid) == 0) {
+            NA_character_
+          } else {
+            list(valid)
+            # pick the value earliest in your recency_order
+            valid[which.min(recency_rank[valid])]
+          }
         }
-      }
+      },
+      # create priority - admin/metadata first, otherwise ranked according to recency
+      priority = if_else(
+        ITEM_TYPE %in% c("administrative", "metadata"),-1L,
+        recency_rank[most_recent]
+      )
     ) |>
     ungroup() |>
-    mutate(priority = case_when(
-      ITEM_TYPE %in% c("administrative", "metadata") ~ -1, # metadata variables at the top of the list
-      .default = 2025 - most_recent_year)) |> # otherwise priority to most recently asked variables
-    arrange(priority, row_id) |> # sort
-    select(-any_of(c("priority", "row_id", "string_distance"))) # remove unnecessary columns
-  return(sorted_varinfo)
+    # Sort by priority
+    arrange(priority, row_id) |>
+    select(-priority, -row_id)
+  return(result)
 }
 
 # Function to generate clean version for dashboard
