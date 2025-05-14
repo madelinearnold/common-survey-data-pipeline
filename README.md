@@ -1,6 +1,6 @@
 # common-survey-data-pipeline
 
-Code for processing survey data, written by the UC Berkeley Graduate Division Instituional Research Team.
+Code for processing survey data, written by the UC Berkeley Graduate Division Institutional Research Team.
 
 ### Update survey variable info using `varinfo-update.R` script 
 
