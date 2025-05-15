@@ -150,7 +150,7 @@ export_manual_update_files <- function(joined_varinfo, unmatched_vars) {
   write_csv(joined_varinfo, needs_manual_update_file)
   # CSV with unmatched variables
   write_csv(unmatched_vars, unmatched_vars_file)
-  cat("✅ Exported joined data for manual updates. Please update the file and 💾 save to the *manually_updated_file* path you specified at the top of the script. Re-run the script once the updates are done to continue processing.\n Also exported unmatched variable data for reference.\n")
+  cat("✅ Exported joined data for manual updates. Please update the file and 💾 save to the *manually_updated_file* path you specified at the top of the script. Re-run the script once the updates are done to continue processing.\nAlso exported unmatched variable data for reference.\n")
 }
 
 # sort the varinfo file according to digits in SurveyAdmin* columns or user supplied list of columns in recency order
@@ -223,12 +223,12 @@ sort_varinfo <- function(updated_varinfo, survey_admin_cols_in_recency_order = N
 }
 
 # Function to generate clean version for dashboard
-generate_dashboard_data <- function(sorted_varinfo) {
-    varinfo_clean <- 
+generate_dashboard_data <- function(sorted_varinfo, join_column_var) {
+  varinfo_clean <- 
     sorted_varinfo |>
     filter(!ITEM_TYPE %in% c("administrative", "metadata"),
            ITEM_NAME != "CONSENT") |>
-    select(ITEM_NAME, ITEM_SECTION, ITEM_STEM, ITEM_MEMBER, SCALE_OPTIONS, ITEM_TYPE, most_recent, ITEM_PARENT_ID)
+    select(any_of(c(join_column_var, "ITEM_SECTION", "ITEM_STEM", "ITEM_MEMBER", "SCALE_OPTIONS", "ITEM_TYPE", "ITEM_PARENT_ID", "most_recent")))
   write_csv(varinfo_clean, trimmed_output_file)
 }
 
@@ -253,7 +253,7 @@ new_cumulative_varinfo <- sort_varinfo(updated_varinfo)
 write_csv(new_cumulative_varinfo, output_file)
 
 # Step 6: Generate dashboard data and save to csv
-generate_dashboard_data(new_cumulative_varinfo)
+generate_dashboard_data(new_cumulative_varinfo, join_column_var)
 
 # Print completion message
 cat("✅ Varinfo update complete. File saved to:", output_file, "\n")
