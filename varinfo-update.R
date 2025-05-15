@@ -1,6 +1,11 @@
+# Source the boilerplate message silencer
+source("R/silence-boilerplate-messages.R")
+
+
 # Load necessary libraries
 library(tidyverse)
 library(fuzzyjoin)
+
 
 # User-defined variables (adjust as needed)
 survey_year <- "2025"
@@ -58,6 +63,32 @@ load_survey_column_info <- function(response_file, qualtrics_col_name, question_
   return(column_info)
 }
 
+# merge columns when joining data frames, adapted from https://alistaire.rbind.io/blog/coalescing-joins/
+coalesce_left_join <- function(x, y, 
+                               by = NULL, suffix = c(".x", ".y"), 
+                               join = dplyr::left_join, ...) {
+  joined <- join(x, y, by = by, suffix = suffix, ...)
+  # names of desired output
+  cols <- union(names(x), names(y))
+  
+  to_coalesce <- names(joined)[!names(joined) %in% cols]
+  suffix_used <- suffix[ifelse(endsWith(to_coalesce, suffix[1]), 1, 2)]
+  # remove suffixes and deduplicate
+  to_coalesce <- unique(substr(
+    to_coalesce, 
+    1, 
+    nchar(to_coalesce) - nchar(suffix_used)
+  ))
+  
+  coalesced <- purrr::map_dfc(to_coalesce, ~dplyr::coalesce(
+    joined[[paste0(.x, suffix[1])]], 
+    joined[[paste0(.x, suffix[2])]]
+  ))
+  names(coalesced) <- to_coalesce
+  
+  dplyr::bind_cols(joined, coalesced)[cols]
+}
+
 # Join latest survey vars with prior varinfo, first by fuzzy match on text then match by variable
 join_varinfo <- function(prior_varinfo, column_info, join_column_text, join_column_var, qualtrics_col_name, question_text_col_name, max_string_distance = 3) {
   
@@ -100,7 +131,7 @@ join_varinfo <- function(prior_varinfo, column_info, join_column_text, join_colu
   num_additional_matches <- num_unmatched_text - num_unmatched
   
   message(sprintf(
-    "🔗 After variable-name join: %d additional matches, %d total matched, %d still unmatched (out of %d).",
+    "🔍 After variable-name join: %d additional matches, %d total matched, %d still unmatched (out of %d).",
     num_additional_matches, num_total_matched, num_unmatched, total_rows
   ))
   
@@ -119,7 +150,7 @@ export_manual_update_files <- function(joined_varinfo, unmatched_vars) {
   write_csv(joined_varinfo, needs_manual_update_file)
   # CSV with unmatched variables
   write_csv(unmatched_vars, unmatched_vars_file)
-  cat("Exported joined data for manual updates. Please update the file and save to the *manually_updated_file* path you specified at the top of the script. Re-run the script once the updates are done to continue processing.\n Also exported unmatched variable data for reference.\n")
+  cat("✅ Exported joined data for manual updates. Please update the file and 💾 save to the *manually_updated_file* path you specified at the top of the script. Re-run the script once the updates are done to continue processing.\n Also exported unmatched variable data for reference.\n")
 }
 
 # sort the varinfo file according to digits in SurveyAdmin* columns or user supplied list of columns in recency order
@@ -197,7 +228,7 @@ generate_dashboard_data <- function(sorted_varinfo) {
     sorted_varinfo |>
     filter(!ITEM_TYPE %in% c("administrative", "metadata"),
            ITEM_NAME != "CONSENT") |>
-    select(ITEM_NAME, ITEM_SECTION, ITEM_STEM, ITEM_MEMBER, SCALE_OPTIONS, ITEM_TYPE, most_recent_year, ITEM_PARENT_ID)
+    select(ITEM_NAME, ITEM_SECTION, ITEM_STEM, ITEM_MEMBER, SCALE_OPTIONS, ITEM_TYPE, most_recent, ITEM_PARENT_ID)
   write_csv(varinfo_clean, trimmed_output_file)
 }
 
@@ -225,4 +256,4 @@ write_csv(new_cumulative_varinfo, output_file)
 generate_dashboard_data(new_cumulative_varinfo)
 
 # Print completion message
-cat("Varinfo update complete. File saved to:", output_file, "\n")
+cat("✅ Varinfo update complete. File saved to:", output_file, "\n")
